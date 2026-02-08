@@ -5,7 +5,6 @@
 build/
 dist/
 release/
-ico/
 
 # PyInstaller spec files
 *.spec
