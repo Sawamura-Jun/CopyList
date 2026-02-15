@@ -3,11 +3,14 @@ import os
 import sys
 
 from PySide6.QtCore import QTimer
+from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import (
     QApplication,
     QAbstractItemView,
+    QCheckBox,
     QHBoxLayout,
     QHeaderView,
+    QLabel,
     QPushButton,
     QTableWidget,
     QTableWidgetItem,
@@ -18,6 +21,7 @@ from PySide6.QtWidgets import (
 WINDOW_SIZE = (700, 300)
 COLUMN_WIDTH_RATIO = (3, 2)  # 文字列:説明
 ROW_HEIGHT = 20
+ICON_RELATIVE_PATH = os.path.join("ico", "CopyList.ico")
 
 
 class CopyListWindow(QWidget):
@@ -30,6 +34,7 @@ class CopyListWindow(QWidget):
         self.app_dir = self._get_app_dir()
         self.csv_path = os.path.join(self.app_dir, "copylist.csv")
         self.csv_encoding = "utf-8-sig"  # 既定はUTF-8(BOM付き)
+        self._set_window_icon()
 
         self.table = QTableWidget(0, 2, self)
         self.table.setHorizontalHeaderLabels(["文字列", "説明"])
@@ -46,8 +51,11 @@ class CopyListWindow(QWidget):
 
         btn_up = QPushButton("↑", self)
         btn_down = QPushButton("↓", self)
-        btn_up.setFixedSize(44, 32)
-        btn_down.setFixedSize(44, 32)
+        # self.pause_copy_checkbox = QCheckBox("一時停止",self)
+        self.pause_copy_checkbox = QCheckBox(parent=self)
+        stop_label = QLabel("一時停止", self)
+        btn_up.setFixedSize(50, 44)
+        btn_down.setFixedSize(50, 44)
 
         main_layout = QHBoxLayout(self)
         main_layout.addWidget(self.table, 1)
@@ -55,6 +63,8 @@ class CopyListWindow(QWidget):
         btn_layout = QVBoxLayout()
         btn_layout.addWidget(btn_up)
         btn_layout.addWidget(btn_down)
+        btn_layout.addWidget(self.pause_copy_checkbox)
+        btn_layout.addWidget(stop_label)
         btn_layout.addStretch(1)
         main_layout.addLayout(btn_layout)
 
@@ -89,6 +99,35 @@ class CopyListWindow(QWidget):
         if getattr(sys, "frozen", False):
             return os.path.dirname(sys.executable)
         return os.path.dirname(os.path.abspath(sys.argv[0]))
+
+    def _find_icon_path(self):
+        candidates = []
+        meipass = getattr(sys, "_MEIPASS", None)
+        if meipass:
+            candidates.append(os.path.join(meipass, ICON_RELATIVE_PATH))
+
+        candidates.append(os.path.join(self.app_dir, ICON_RELATIVE_PATH))
+        candidates.append(os.path.join(self.app_dir, "_internal", ICON_RELATIVE_PATH))
+        candidates.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), ICON_RELATIVE_PATH))
+
+        for path in candidates:
+            if os.path.isfile(path):
+                return path
+        return ""
+
+    def _set_window_icon(self):
+        icon_path = self._find_icon_path()
+        if not icon_path:
+            return
+
+        icon = QIcon(icon_path)
+        if icon.isNull():
+            return
+
+        self.setWindowIcon(icon)
+        app = QApplication.instance()
+        if app is not None:
+            app.setWindowIcon(icon)
 
     def load_csv(self):
         self._suspend_events = True
@@ -212,6 +251,8 @@ class CopyListWindow(QWidget):
         self._copy_selected_text()
 
     def _copy_selected_text(self):
+        if self.pause_copy_checkbox.isChecked():
+            return
         row = self._get_selected_row()
         if row < 0:
             return
