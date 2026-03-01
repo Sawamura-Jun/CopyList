@@ -12,3 +12,8 @@ release/
 # Compile data
 __pycache__
 *.pyc
+
+# other
+*.ini
+*.csv
+*.log

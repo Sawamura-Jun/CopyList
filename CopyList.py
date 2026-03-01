@@ -1,9 +1,13 @@
 import csv
 import configparser
+import ctypes
+from ctypes import wintypes
+import logging
+from logging.handlers import RotatingFileHandler
 import os
 import sys
 
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import QEvent, Qt, QTimer
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import (
     QApplication,
@@ -27,6 +31,15 @@ ICON_RELATIVE_PATH = os.path.join("ico", "CopyList.ico")
 INI_FILENAME = "copylist.ini"
 INI_SECTION = "settings"
 CSV_EMPTY_LABEL = "(未選択)"
+LOG_FILENAME = "copylist.log"
+LOG_MAX_BYTES = 512 * 1024
+LOG_BACKUP_COUNT = 2
+SWP_NOSIZE = 0x0001
+SWP_NOMOVE = 0x0002
+SWP_NOACTIVATE = 0x0010
+SWP_NOOWNERZORDER = 0x0200
+HWND_TOPMOST = -1
+HWND_NOTOPMOST = -2
 
 
 class CopyListWindow(QWidget):
@@ -37,10 +50,14 @@ class CopyListWindow(QWidget):
 
         self._suspend_events = False  # 変更イベントの再入を抑止
         self.app_dir = self._get_app_dir()
+        self.log_path = os.path.join(self.app_dir, LOG_FILENAME)
+        self.logger = self._setup_logger()
+        self._user32 = self._load_user32()
         self.ini_path = os.path.join(self.app_dir, INI_FILENAME)
         self.csv_path = ""
         self.csv_encoding = "utf-8-sig"  # 既定はUTF-8(BOM付き)
         self._settings = self._load_settings()
+        self.logger.info("CopyList start app_dir=%s", self.app_dir)
         self._set_window_icon()
 
         self.csv_combo = QComboBox(self)
@@ -100,6 +117,67 @@ class CopyListWindow(QWidget):
         self.load_csv()  # 起動時にCSV読み込み
         self.ensure_trailing_empty()
         QTimer.singleShot(0, self._apply_default_column_ratio)
+
+    def _setup_logger(self):
+        logger = logging.getLogger("copylist")
+        logger.setLevel(logging.DEBUG)
+        logger.propagate = False
+
+        target_path = os.path.abspath(self.log_path)
+        for handler in logger.handlers:
+            base_path = getattr(handler, "baseFilename", "")
+            if base_path and os.path.abspath(base_path) == target_path:
+                return logger
+
+        try:
+            handler = RotatingFileHandler(
+                self.log_path,
+                maxBytes=LOG_MAX_BYTES,
+                backupCount=LOG_BACKUP_COUNT,
+                encoding="utf-8",
+            )
+            handler.setLevel(logging.DEBUG)
+            handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
+            logger.addHandler(handler)
+        except OSError:
+            logger.addHandler(logging.NullHandler())
+        return logger
+
+    def _load_user32(self):
+        if sys.platform != "win32":
+            return None
+        try:
+            user32 = ctypes.WinDLL("user32", use_last_error=True)
+            user32.SetWindowPos.argtypes = [
+                wintypes.HWND,
+                wintypes.HWND,
+                ctypes.c_int,
+                ctypes.c_int,
+                ctypes.c_int,
+                ctypes.c_int,
+                ctypes.c_uint,
+            ]
+            user32.SetWindowPos.restype = wintypes.BOOL
+            return user32
+        except Exception:
+            self.logger.exception("user32 load failed")
+            return None
+
+    def _window_state_snapshot(self):
+        geo = self.geometry()
+        try:
+            hwnd = int(self.winId())
+        except Exception:
+            hwnd = 0
+        return (
+            f"visible={self.isVisible()} hidden={self.isHidden()} active={self.isActiveWindow()} "
+            f"min={self.isMinimized()} max={self.isMaximized()} "
+            f"flags=0x{int(self.windowFlags()):x} hwnd={hwnd} "
+            f"geo=({geo.x()},{geo.y()},{geo.width()},{geo.height()})"
+        )
+
+    def _log_window_state(self, label):
+        self.logger.debug("%s | %s", label, self._window_state_snapshot())
 
     def _apply_default_column_ratio(self):
         total = COLUMN_WIDTH_RATIO[0] + COLUMN_WIDTH_RATIO[1]
@@ -202,7 +280,9 @@ class CopyListWindow(QWidget):
         try:
             with open(self.ini_path, "w", encoding="utf-8") as f:
                 parser.write(f)
+            self.logger.debug("settings saved ini=%s", self.ini_path)
         except OSError:
+            self.logger.exception("settings save failed ini=%s", self.ini_path)
             pass
 
     def _restore_window_position_from_settings(self):
@@ -210,6 +290,7 @@ class CopyListWindow(QWidget):
         y = self._settings.get("window_y")
         if isinstance(x, int) and isinstance(y, int):
             self.move(x, y)
+            self.logger.debug("window position restored x=%s y=%s", x, y)
 
     def _list_csv_files(self):
         files = []
@@ -389,11 +470,21 @@ class CopyListWindow(QWidget):
 
     def on_csv_changed(self, index):
         self._set_csv_path_from_name(self._current_csv_name())
+        self.logger.debug("csv changed index=%s path=%s", index, self.csv_path)
         self.load_csv()
         self.ensure_trailing_empty()
         self._save_settings()
 
     def _apply_always_on_top(self, checked):
+        self._log_window_state(f"topmost apply start checked={checked}")
+        if sys.platform == "win32" and self.isVisible():
+            if self._set_windows_topmost(checked):
+                self._log_window_state(f"topmost apply end(winapi) checked={checked}")
+                if checked:
+                    self.raise_()
+                    self.activateWindow()
+                return
+
         # setWindowFlag() は表示中ウィンドウを一旦隠すため、
         # 変更前の表示状態を保持して再表示する。
         was_visible = self.isVisible()
@@ -403,8 +494,43 @@ class CopyListWindow(QWidget):
             if checked:
                 self.raise_()
                 self.activateWindow()
+        self._log_window_state(f"topmost apply end(qt-fallback) checked={checked}")
+
+    def _set_windows_topmost(self, checked):
+        try:
+            hwnd = int(self.winId())
+        except Exception:
+            self.logger.exception("winId acquisition failed")
+            return False
+        if hwnd == 0:
+            self.logger.warning("winId is 0, skip SetWindowPos")
+            return False
+
+        flags = SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE | SWP_NOOWNERZORDER
+        insert_after = HWND_TOPMOST if checked else HWND_NOTOPMOST
+        try:
+            if self._user32 is None:
+                self.logger.warning("user32 is not available, skip SetWindowPos")
+                return False
+            ctypes.set_last_error(0)
+            result = self._user32.SetWindowPos(hwnd, insert_after, 0, 0, 0, 0, flags)
+            err = ctypes.get_last_error()
+            self.logger.debug(
+                "SetWindowPos checked=%s hwnd=%s insert_after=%s flags=0x%x result=%s last_error=%s",
+                checked,
+                hwnd,
+                insert_after,
+                flags,
+                bool(result),
+                err,
+            )
+        except Exception:
+            self.logger.exception("SetWindowPos failed")
+            return False
+        return bool(result)
 
     def on_always_on_top_toggled(self, checked):
+        self.logger.info("topmost toggled checked=%s", checked)
         self._apply_always_on_top(checked)
         self._save_settings()
 
@@ -472,8 +598,30 @@ class CopyListWindow(QWidget):
             self.table.scrollToItem(item)
 
     def closeEvent(self, event):
+        self._log_window_state("closeEvent")
         self._save_settings()
+        self.logger.info("CopyList closing")
         super().closeEvent(event)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._log_window_state("showEvent")
+
+    def hideEvent(self, event):
+        super().hideEvent(event)
+        self._log_window_state("hideEvent")
+
+    def changeEvent(self, event):
+        super().changeEvent(event)
+        if event.type() == QEvent.Type.WindowStateChange:
+            self._log_window_state("changeEvent(WindowStateChange)")
+
+    def event(self, event):
+        if event.type() == QEvent.Type.WindowActivate:
+            self._log_window_state("event(WindowActivate)")
+        elif event.type() == QEvent.Type.WindowDeactivate:
+            self._log_window_state("event(WindowDeactivate)")
+        return super().event(event)
 
 
 def main():
