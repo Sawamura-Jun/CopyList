@@ -96,6 +96,7 @@ class CopyListWindow(QWidget):
         btn_down.clicked.connect(self.on_move_down)
 
         self._initialize_controls_from_settings()
+        self._restore_window_position_from_settings()
         self.load_csv()  # 起動時にCSV読み込み
         self.ensure_trailing_empty()
         QTimer.singleShot(0, self._apply_default_column_ratio)
@@ -151,7 +152,13 @@ class CopyListWindow(QWidget):
             app.setWindowIcon(icon)
 
     def _load_settings(self):
-        defaults = {"last_csv": "", "always_on_top": False, "pause_copy": False}
+        defaults = {
+            "last_csv": "",
+            "always_on_top": False,
+            "pause_copy": False,
+            "window_x": None,
+            "window_y": None,
+        }
         if not os.path.exists(self.ini_path):
             return defaults
 
@@ -161,9 +168,27 @@ class CopyListWindow(QWidget):
             defaults["last_csv"] = parser.get(INI_SECTION, "last_csv", fallback="").strip()
             defaults["always_on_top"] = parser.getboolean(INI_SECTION, "always_on_top", fallback=False)
             defaults["pause_copy"] = parser.getboolean(INI_SECTION, "pause_copy", fallback=False)
+            defaults["window_x"] = self._parse_optional_int(parser.get(INI_SECTION, "window_x", fallback=""))
+            defaults["window_y"] = self._parse_optional_int(parser.get(INI_SECTION, "window_y", fallback=""))
         except (configparser.Error, OSError, ValueError):
-            return {"last_csv": "", "always_on_top": False, "pause_copy": False}
+            return {
+                "last_csv": "",
+                "always_on_top": False,
+                "pause_copy": False,
+                "window_x": None,
+                "window_y": None,
+            }
         return defaults
+
+    @staticmethod
+    def _parse_optional_int(value):
+        text = str(value).strip()
+        if not text:
+            return None
+        try:
+            return int(text)
+        except ValueError:
+            return None
 
     def _save_settings(self):
         parser = configparser.ConfigParser()
@@ -171,12 +196,20 @@ class CopyListWindow(QWidget):
             "last_csv": self._current_csv_name(),
             "always_on_top": "1" if self.always_on_top_checkbox.isChecked() else "0",
             "pause_copy": "1" if self.pause_copy_checkbox.isChecked() else "0",
+            "window_x": str(self.x()),
+            "window_y": str(self.y()),
         }
         try:
             with open(self.ini_path, "w", encoding="utf-8") as f:
                 parser.write(f)
         except OSError:
             pass
+
+    def _restore_window_position_from_settings(self):
+        x = self._settings.get("window_x")
+        y = self._settings.get("window_y")
+        if isinstance(x, int) and isinstance(y, int):
+            self.move(x, y)
 
     def _list_csv_files(self):
         files = []
