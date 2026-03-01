@@ -1,13 +1,15 @@
 import csv
+import configparser
 import os
 import sys
 
-from PySide6.QtCore import QTimer
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import (
     QApplication,
     QAbstractItemView,
     QCheckBox,
+    QComboBox,
     QHBoxLayout,
     QHeaderView,
     QLabel,
@@ -22,6 +24,9 @@ WINDOW_SIZE = (700, 300)
 COLUMN_WIDTH_RATIO = (3, 2)  # 文字列:説明
 ROW_HEIGHT = 20
 ICON_RELATIVE_PATH = os.path.join("ico", "CopyList.ico")
+INI_FILENAME = "copylist.ini"
+INI_SECTION = "settings"
+CSV_EMPTY_LABEL = "(未選択)"
 
 
 class CopyListWindow(QWidget):
@@ -32,9 +37,16 @@ class CopyListWindow(QWidget):
 
         self._suspend_events = False  # 変更イベントの再入を抑止
         self.app_dir = self._get_app_dir()
-        self.csv_path = os.path.join(self.app_dir, "copylist.csv")
+        self.ini_path = os.path.join(self.app_dir, INI_FILENAME)
+        self.csv_path = ""
         self.csv_encoding = "utf-8-sig"  # 既定はUTF-8(BOM付き)
+        self._settings = self._load_settings()
         self._set_window_icon()
+
+        self.csv_combo = QComboBox(self)
+        self.csv_combo.setMinimumWidth(220)
+        self.pause_copy_checkbox = QCheckBox("一時停止", self)
+        self.always_on_top_checkbox = QCheckBox("最前面", self)
 
         self.table = QTableWidget(0, 2, self)
         self.table.setHorizontalHeaderLabels(["文字列", "説明"])
@@ -51,30 +63,39 @@ class CopyListWindow(QWidget):
 
         btn_up = QPushButton("↑", self)
         btn_down = QPushButton("↓", self)
-        # self.pause_copy_checkbox = QCheckBox("一時停止",self)
-        self.pause_copy_checkbox = QCheckBox(parent=self)
-        stop_label = QLabel("一時停止", self)
         btn_up.setFixedSize(50, 44)
         btn_down.setFixedSize(50, 44)
 
-        main_layout = QHBoxLayout(self)
-        main_layout.addWidget(self.table, 1)
+        top_layout = QHBoxLayout()
+        top_layout.addWidget(QLabel("CSV:", self))
+        top_layout.addWidget(self.csv_combo)
+        top_layout.addStretch(1)
+        top_layout.addWidget(self.always_on_top_checkbox)
+        top_layout.addWidget(self.pause_copy_checkbox)
 
+        content_layout = QHBoxLayout()
+        content_layout.addWidget(self.table, 1)
         btn_layout = QVBoxLayout()
         btn_layout.addWidget(btn_up)
         btn_layout.addWidget(btn_down)
-        btn_layout.addWidget(self.pause_copy_checkbox)
-        btn_layout.addWidget(stop_label)
         btn_layout.addStretch(1)
-        main_layout.addLayout(btn_layout)
+        content_layout.addLayout(btn_layout)
+
+        main_layout = QVBoxLayout(self)
+        main_layout.addLayout(top_layout)
+        main_layout.addLayout(content_layout, 1)
 
         # 編集/選択/クリックのイベント
         self.table.itemChanged.connect(self.on_value_changed)
         self.table.itemSelectionChanged.connect(self.on_selection_changed)
         self.table.cellClicked.connect(self.on_cell_clicked)
+        self.csv_combo.currentIndexChanged.connect(self.on_csv_changed)
+        self.pause_copy_checkbox.toggled.connect(self.on_pause_toggled)
+        self.always_on_top_checkbox.toggled.connect(self.on_always_on_top_toggled)
         btn_up.clicked.connect(self.on_move_up)
         btn_down.clicked.connect(self.on_move_down)
 
+        self._initialize_controls_from_settings()
         self.load_csv()  # 起動時にCSV読み込み
         self.ensure_trailing_empty()
         QTimer.singleShot(0, self._apply_default_column_ratio)
@@ -129,12 +150,90 @@ class CopyListWindow(QWidget):
         if app is not None:
             app.setWindowIcon(icon)
 
+    def _load_settings(self):
+        defaults = {"last_csv": "", "always_on_top": False, "pause_copy": False}
+        if not os.path.exists(self.ini_path):
+            return defaults
+
+        parser = configparser.ConfigParser()
+        try:
+            parser.read(self.ini_path, encoding="utf-8")
+            defaults["last_csv"] = parser.get(INI_SECTION, "last_csv", fallback="").strip()
+            defaults["always_on_top"] = parser.getboolean(INI_SECTION, "always_on_top", fallback=False)
+            defaults["pause_copy"] = parser.getboolean(INI_SECTION, "pause_copy", fallback=False)
+        except (configparser.Error, OSError, ValueError):
+            return {"last_csv": "", "always_on_top": False, "pause_copy": False}
+        return defaults
+
+    def _save_settings(self):
+        parser = configparser.ConfigParser()
+        parser[INI_SECTION] = {
+            "last_csv": self._current_csv_name(),
+            "always_on_top": "1" if self.always_on_top_checkbox.isChecked() else "0",
+            "pause_copy": "1" if self.pause_copy_checkbox.isChecked() else "0",
+        }
+        try:
+            with open(self.ini_path, "w", encoding="utf-8") as f:
+                parser.write(f)
+        except OSError:
+            pass
+
+    def _list_csv_files(self):
+        files = []
+        try:
+            for name in os.listdir(self.app_dir):
+                path = os.path.join(self.app_dir, name)
+                if os.path.isfile(path) and name.lower().endswith(".csv"):
+                    files.append(name)
+        except OSError:
+            return []
+        return sorted(files, key=str.lower)
+
+    def _current_csv_name(self):
+        data = self.csv_combo.currentData()
+        return data if isinstance(data, str) else ""
+
+    def _set_csv_path_from_name(self, name):
+        if name:
+            self.csv_path = os.path.join(self.app_dir, name)
+        else:
+            self.csv_path = ""
+
+    def _refresh_csv_combo(self, selected_name=""):
+        files = self._list_csv_files()
+        self.csv_combo.blockSignals(True)
+        try:
+            self.csv_combo.clear()
+            self.csv_combo.addItem(CSV_EMPTY_LABEL, "")
+            for file_name in files:
+                self.csv_combo.addItem(file_name, file_name)
+
+            index = self.csv_combo.findData(selected_name)
+            self.csv_combo.setCurrentIndex(index if index >= 0 else 0)
+        finally:
+            self.csv_combo.blockSignals(False)
+
+        self._set_csv_path_from_name(self._current_csv_name())
+
+    def _initialize_controls_from_settings(self):
+        last_csv = self._settings.get("last_csv", "")
+        self._refresh_csv_combo(last_csv)
+
+        self.pause_copy_checkbox.blockSignals(True)
+        self.pause_copy_checkbox.setChecked(bool(self._settings.get("pause_copy", False)))
+        self.pause_copy_checkbox.blockSignals(False)
+
+        self.always_on_top_checkbox.blockSignals(True)
+        self.always_on_top_checkbox.setChecked(bool(self._settings.get("always_on_top", False)))
+        self.always_on_top_checkbox.blockSignals(False)
+        self._apply_always_on_top(self.always_on_top_checkbox.isChecked())
+
     def load_csv(self):
         self._suspend_events = True
         self.table.setRowCount(0)
 
         rows = []
-        if os.path.exists(self.csv_path):
+        if self.csv_path and os.path.exists(self.csv_path):
             rows, encoding = self._read_csv_with_fallback()
             self.csv_encoding = encoding
 
@@ -153,6 +252,9 @@ class CopyListWindow(QWidget):
         self._set_row_values(row, [col0, col1])
 
     def _read_csv_with_fallback(self):
+        if not self.csv_path:
+            return [], self.csv_encoding
+
         # 文字コードを順に試して読み込む
         for encoding in ("utf-8-sig", "cp932"):
             try:
@@ -169,6 +271,8 @@ class CopyListWindow(QWidget):
         return rows, "utf-8-sig"
 
     def save_csv(self):
+        if not self.csv_path:
+            return
         rows = self._collect_rows_for_save()
         os.makedirs(os.path.dirname(self.csv_path), exist_ok=True)
         try:
@@ -250,6 +354,30 @@ class CopyListWindow(QWidget):
         # クリック時にもコピーする
         self._copy_selected_text()
 
+    def on_csv_changed(self, index):
+        self._set_csv_path_from_name(self._current_csv_name())
+        self.load_csv()
+        self.ensure_trailing_empty()
+        self._save_settings()
+
+    def _apply_always_on_top(self, checked):
+        # setWindowFlag() は表示中ウィンドウを一旦隠すため、
+        # 変更前の表示状態を保持して再表示する。
+        was_visible = self.isVisible()
+        self.setWindowFlag(Qt.WindowStaysOnTopHint, checked)
+        if was_visible:
+            self.show()
+            if checked:
+                self.raise_()
+                self.activateWindow()
+
+    def on_always_on_top_toggled(self, checked):
+        self._apply_always_on_top(checked)
+        self._save_settings()
+
+    def on_pause_toggled(self, checked):
+        self._save_settings()
+
     def _copy_selected_text(self):
         if self.pause_copy_checkbox.isChecked():
             return
@@ -309,6 +437,10 @@ class CopyListWindow(QWidget):
         item = self.table.item(row, 0)
         if item is not None:
             self.table.scrollToItem(item)
+
+    def closeEvent(self, event):
+        self._save_settings()
+        super().closeEvent(event)
 
 
 def main():
