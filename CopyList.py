@@ -40,7 +40,7 @@ HWND_NOTOPMOST = -2
 class CopyListWindow(QWidget):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("CopyList v1.3.0")
+        self.setWindowTitle("CopyList v1.3.1")
         self.resize(*WINDOW_SIZE)
 
         self._suspend_events = False  # 変更イベントの再入を抑止
