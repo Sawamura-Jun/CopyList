@@ -40,7 +40,7 @@ HWND_NOTOPMOST = -2
 class CopyListWindow(QWidget):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("CopyList v1.3.1")
+        self.setWindowTitle("CopyList v1.3.2")
         self.resize(*WINDOW_SIZE)
 
         self._suspend_events = False  # 変更イベントの再入を抑止
@@ -55,6 +55,7 @@ class CopyListWindow(QWidget):
         self.csv_combo = QComboBox(self)
         self.csv_combo.setMinimumWidth(220)
         self.open_csv_button = QPushButton("csvファイル開く", self)
+        self.open_app_dir_button = QPushButton("フォルダーを開く", self)
         self.pause_copy_checkbox = QCheckBox("一時停止", self)
         self.always_on_top_checkbox = QCheckBox("最前面", self)
 
@@ -80,6 +81,7 @@ class CopyListWindow(QWidget):
         top_layout.addWidget(QLabel("CSV:", self))
         top_layout.addWidget(self.csv_combo)
         top_layout.addWidget(self.open_csv_button)
+        top_layout.addWidget(self.open_app_dir_button)
         top_layout.addStretch(1)
         top_layout.addWidget(self.always_on_top_checkbox)
         top_layout.addWidget(self.pause_copy_checkbox)
@@ -102,6 +104,7 @@ class CopyListWindow(QWidget):
         self.table.cellClicked.connect(self.on_cell_clicked)
         self.csv_combo.currentIndexChanged.connect(self.on_csv_changed)
         self.open_csv_button.clicked.connect(self.on_open_csv_file_clicked)
+        self.open_app_dir_button.clicked.connect(self.on_open_app_dir_clicked)
         self.pause_copy_checkbox.toggled.connect(self.on_pause_toggled)
         self.always_on_top_checkbox.toggled.connect(self.on_always_on_top_toggled)
         btn_up.clicked.connect(self.on_move_up)
@@ -434,6 +437,10 @@ class CopyListWindow(QWidget):
             self._update_open_csv_button_state()
             return
         QDesktopServices.openUrl(QUrl.fromLocalFile(self.csv_path))
+
+    def on_open_app_dir_clicked(self):
+        if os.path.isdir(self.app_dir):
+            QDesktopServices.openUrl(QUrl.fromLocalFile(self.app_dir))
 
     def _apply_always_on_top(self, checked):
         if sys.platform == "win32" and self.isVisible():
