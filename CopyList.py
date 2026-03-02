@@ -5,8 +5,8 @@ from ctypes import wintypes
 import os
 import sys
 
-from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QIcon
+from PySide6.QtCore import Qt, QTimer, QUrl
+from PySide6.QtGui import QDesktopServices, QIcon
 from PySide6.QtWidgets import (
     QApplication,
     QAbstractItemView,
@@ -54,6 +54,7 @@ class CopyListWindow(QWidget):
 
         self.csv_combo = QComboBox(self)
         self.csv_combo.setMinimumWidth(220)
+        self.open_csv_button = QPushButton("csvファイル開く", self)
         self.pause_copy_checkbox = QCheckBox("一時停止", self)
         self.always_on_top_checkbox = QCheckBox("最前面", self)
 
@@ -78,6 +79,7 @@ class CopyListWindow(QWidget):
         top_layout = QHBoxLayout()
         top_layout.addWidget(QLabel("CSV:", self))
         top_layout.addWidget(self.csv_combo)
+        top_layout.addWidget(self.open_csv_button)
         top_layout.addStretch(1)
         top_layout.addWidget(self.always_on_top_checkbox)
         top_layout.addWidget(self.pause_copy_checkbox)
@@ -99,6 +101,7 @@ class CopyListWindow(QWidget):
         self.table.itemSelectionChanged.connect(self.on_selection_changed)
         self.table.cellClicked.connect(self.on_cell_clicked)
         self.csv_combo.currentIndexChanged.connect(self.on_csv_changed)
+        self.open_csv_button.clicked.connect(self.on_open_csv_file_clicked)
         self.pause_copy_checkbox.toggled.connect(self.on_pause_toggled)
         self.always_on_top_checkbox.toggled.connect(self.on_always_on_top_toggled)
         btn_up.clicked.connect(self.on_move_up)
@@ -275,6 +278,10 @@ class CopyListWindow(QWidget):
             self.csv_combo.blockSignals(False)
 
         self._set_csv_path_from_name(self._current_csv_name())
+        self._update_open_csv_button_state()
+
+    def _update_open_csv_button_state(self):
+        self.open_csv_button.setEnabled(bool(self.csv_path and os.path.isfile(self.csv_path)))
 
     def _initialize_controls_from_settings(self):
         last_csv = self._settings.get("last_csv", "")
@@ -417,9 +424,16 @@ class CopyListWindow(QWidget):
 
     def on_csv_changed(self, index):
         self._set_csv_path_from_name(self._current_csv_name())
+        self._update_open_csv_button_state()
         self.load_csv()
         self.ensure_trailing_empty()
         self._save_settings()
+
+    def on_open_csv_file_clicked(self):
+        if not self.csv_path or not os.path.isfile(self.csv_path):
+            self._update_open_csv_button_state()
+            return
+        QDesktopServices.openUrl(QUrl.fromLocalFile(self.csv_path))
 
     def _apply_always_on_top(self, checked):
         if sys.platform == "win32" and self.isVisible():
