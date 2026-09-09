@@ -17,3 +17,4 @@ __pycache__
 *.ini
 *.csv
 *.log
+AGENTS.md

@@ -40,7 +40,7 @@ HWND_NOTOPMOST = -2
 class CopyListWindow(QWidget):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("CopyList v1.3.2")
+        self.setWindowTitle("CopyList v1.3.3")
         self.resize(*WINDOW_SIZE)
 
         self._suspend_events = False  # 変更イベントの再入を抑止
@@ -70,7 +70,8 @@ class CopyListWindow(QWidget):
         self.table.verticalHeader().setMinimumSectionSize(ROW_HEIGHT)
         header = self.table.horizontalHeader()
         header.setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)
-        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Interactive)
+        # 中央の分割線を動かしても、説明列をリストの右端まで広げる。
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
 
         btn_up = QPushButton("↑", self)
         btn_down = QPushButton("↓", self)
@@ -143,9 +144,8 @@ class CopyListWindow(QWidget):
         viewport_width = max(1, self.table.viewport().width())
         col0_width = int(viewport_width * COLUMN_WIDTH_RATIO[0] / total)
         col0_width = max(80, col0_width)
-        col1_width = max(80, viewport_width - col0_width)
+        # 説明列の幅はヘッダーの自動調整に任せる。
         self.table.setColumnWidth(0, col0_width)
-        self.table.setColumnWidth(1, col1_width)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
