@@ -6,7 +6,7 @@ import os
 import sys
 
 from PySide6.QtCore import Qt, QTimer, QUrl
-from PySide6.QtGui import QDesktopServices, QIcon
+from PySide6.QtGui import QColor, QDesktopServices, QIcon, QPainter
 from PySide6.QtWidgets import (
     QApplication,
     QAbstractItemView,
@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QLabel,
     QPushButton,
+    QStyle,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
@@ -25,6 +26,7 @@ from PySide6.QtWidgets import (
 WINDOW_SIZE = (700, 300)
 COLUMN_WIDTH_RATIO = (3, 2)  # 文字列:説明
 ROW_HEIGHT = 20
+ARROW_ICON_COLOR = "#ffffff"  # 上下移動アイコンの色
 ICON_RELATIVE_PATH = os.path.join("ico", "CopyList.ico")
 INI_FILENAME = "copylist.ini"
 INI_SECTION = "settings"
@@ -40,7 +42,7 @@ HWND_NOTOPMOST = -2
 class CopyListWindow(QWidget):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("CopyList v1.3.3")
+        self.setWindowTitle("CopyList v1.3.4")
         self.resize(*WINDOW_SIZE)
 
         self._suspend_events = False  # 変更イベントの再入を抑止
@@ -73,8 +75,13 @@ class CopyListWindow(QWidget):
         # 中央の分割線を動かしても、説明列をリストの右端まで広げる。
         header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
 
-        btn_up = QPushButton("↑", self)
-        btn_down = QPushButton("↓", self)
+        # 上下移動ボタンにはQt標準の矢印アイコンを使用する。
+        btn_up = QPushButton(self)
+        btn_up.setIcon(self._create_arrow_icon(QStyle.StandardPixmap.SP_ArrowUp, btn_up.iconSize()))
+        btn_up.setAccessibleName("上へ移動")
+        btn_down = QPushButton(self)
+        btn_down.setIcon(self._create_arrow_icon(QStyle.StandardPixmap.SP_ArrowDown, btn_down.iconSize()))
+        btn_down.setAccessibleName("下へ移動")
         btn_up.setFixedSize(50, 44)
         btn_down.setFixedSize(50, 44)
 
@@ -116,6 +123,17 @@ class CopyListWindow(QWidget):
         self.load_csv()  # 起動時にCSV読み込み
         self.ensure_trailing_empty()
         QTimer.singleShot(0, self._apply_default_column_ratio)
+
+    def _create_arrow_icon(self, standard_pixmap, size):
+        pixmap = self.style().standardIcon(standard_pixmap).pixmap(size)
+        # 透明部分と輪郭を保ち、標準アイコンの色だけを変更する。
+        painter = QPainter(pixmap)
+        try:
+            painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceIn)
+            painter.fillRect(pixmap.rect(), QColor(ARROW_ICON_COLOR))
+        finally:
+            painter.end()
+        return QIcon(pixmap)
 
     def _load_user32(self):
         if sys.platform != "win32":
