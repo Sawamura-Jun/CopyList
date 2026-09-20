@@ -12,9 +12,13 @@ release/
 # Compile data
 __pycache__
 *.pyc
+.pytest_cache/
 
 # other
 *.ini
 *.csv
 *.log
 AGENTS.md
+
+# tests
+tests/

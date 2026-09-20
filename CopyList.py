@@ -5,7 +5,7 @@ from ctypes import wintypes
 import os
 import sys
 
-from PySide6.QtCore import Qt, QTimer, QUrl
+from PySide6.QtCore import QEvent, Qt, QTimer, QUrl
 from PySide6.QtGui import QColor, QDesktopServices, QIcon, QPainter
 from PySide6.QtWidgets import (
     QApplication,
@@ -25,6 +25,7 @@ from PySide6.QtWidgets import (
 
 WINDOW_SIZE = (700, 300)
 COLUMN_WIDTH_RATIO = (3, 2)  # 文字列:説明
+DEFAULT_MIN_COLUMN_WIDTH = 80  # 保存値がない場合の文字列列の最小幅
 ROW_HEIGHT = 20
 ARROW_ICON_COLOR = "#ffffff"  # 上下移動アイコンの色
 ICON_RELATIVE_PATH = os.path.join("ico", "CopyList.ico")
@@ -42,10 +43,11 @@ HWND_NOTOPMOST = -2
 class CopyListWindow(QWidget):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("CopyList v1.3.4")
+        self.setWindowTitle("CopyList v1.3.5")
         self.resize(*WINDOW_SIZE)
 
         self._suspend_events = False  # 変更イベントの再入を抑止
+        self._applying_column_width = False  # カラム幅の復元中は保存を抑止
         self.app_dir = self._get_app_dir()
         self._user32 = self._load_user32()
         self.ini_path = os.path.join(self.app_dir, INI_FILENAME)
@@ -122,7 +124,13 @@ class CopyListWindow(QWidget):
         self._restore_window_position_from_settings()
         self.load_csv()  # 起動時にCSV読み込み
         self.ensure_trailing_empty()
-        QTimer.singleShot(0, self._apply_default_column_ratio)
+        header.sectionResized.connect(self.on_column_resized)
+        # レイアウトやスクロールバーの更新後に、実際の表示幅で比率を適用する。
+        self._column_resize_timer = QTimer(self)
+        self._column_resize_timer.setSingleShot(True)
+        self._column_resize_timer.timeout.connect(self._apply_column_width)
+        self.table.viewport().installEventFilter(self)
+        self._column_resize_timer.start(0)
 
     def _create_arrow_icon(self, standard_pixmap, size):
         pixmap = self.style().standardIcon(standard_pixmap).pixmap(size)
@@ -154,20 +162,54 @@ class CopyListWindow(QWidget):
         except Exception:
             return None
 
-    def _apply_default_column_ratio(self):
-        total = COLUMN_WIDTH_RATIO[0] + COLUMN_WIDTH_RATIO[1]
-        if total <= 0:
+    def _apply_column_width(self):
+        viewport_width = self.table.viewport().width()
+        if viewport_width <= 0:
             return
+        header = self.table.horizontalHeader()
+        min_width = header.minimumSectionSize()
+        max_width = max(min_width, viewport_width - min_width)
+        ratio = self._settings.get("column_width_ratio")
+        col0_width = self._settings.get("column_width")
+        if ratio is not None:
+            col0_width = round(viewport_width * ratio)
+        elif col0_width is not None:
+            # 旧形式のピクセル幅は、最初の表示幅を基準に比率へ移行する。
+            col0_width = max(min_width, min(col0_width, max_width))
+            self._settings["column_width_ratio"] = col0_width / viewport_width
+        else:
+            total = COLUMN_WIDTH_RATIO[0] + COLUMN_WIDTH_RATIO[1]
+            if total <= 0:
+                return
+            col0_width = max(
+                DEFAULT_MIN_COLUMN_WIDTH, int(viewport_width * COLUMN_WIDTH_RATIO[0] / total)
+            )
 
-        viewport_width = max(1, self.table.viewport().width())
-        col0_width = int(viewport_width * COLUMN_WIDTH_RATIO[0] / total)
-        col0_width = max(80, col0_width)
+        # 復元や自動調整を手動変更として保存しない。
+        # 両列の最小幅を確保し、縮小時も説明列を画面内に収める。
         # 説明列の幅はヘッダーの自動調整に任せる。
-        self.table.setColumnWidth(0, col0_width)
+        self._applying_column_width = True
+        try:
+            self.table.setColumnWidth(0, max(min_width, min(col0_width, max_width)))
+        finally:
+            self._applying_column_width = False
 
-    def resizeEvent(self, event):
-        super().resizeEvent(event)
-        self._apply_default_column_ratio()
+    def on_column_resized(self, logical_index, old_size, new_size):
+        # 自動伸縮する説明列は保存せず、中央の分割位置だけを記録する。
+        if self._applying_column_width or logical_index != 0 or new_size <= 0:
+            return
+        self._settings["column_width"] = new_size
+        # 説明列が最小幅になるまでドラッグされた場合も、有効な比率を保つ。
+        total_width = max(
+            self.table.viewport().width(), new_size + self.table.horizontalHeader().minimumSectionSize()
+        )
+        self._settings["column_width_ratio"] = new_size / total_width
+        self._save_settings()
+
+    def eventFilter(self, watched, event):
+        if watched is self.table.viewport() and event.type() == QEvent.Type.Resize:
+            self._column_resize_timer.start(0)
+        return super().eventFilter(watched, event)
 
     def _get_app_dir(self):
         if getattr(sys, "frozen", False):
@@ -210,6 +252,8 @@ class CopyListWindow(QWidget):
             "pause_copy": False,
             "window_x": None,
             "window_y": None,
+            "column_width": None,
+            "column_width_ratio": None,
         }
         if not os.path.exists(self.ini_path):
             return defaults
@@ -222,6 +266,16 @@ class CopyListWindow(QWidget):
             defaults["pause_copy"] = parser.getboolean(INI_SECTION, "pause_copy", fallback=False)
             defaults["window_x"] = self._parse_optional_int(parser.get(INI_SECTION, "window_x", fallback=""))
             defaults["window_y"] = self._parse_optional_int(parser.get(INI_SECTION, "window_y", fallback=""))
+            column_width = self._parse_optional_int(parser.get(INI_SECTION, "column_width", fallback=""))
+            if column_width is not None and column_width > 0:
+                defaults["column_width"] = column_width
+            # 不正な比率は無視し、旧形式の幅または既定比率を使用する。
+            try:
+                ratio = parser.getfloat(INI_SECTION, "column_width_ratio", fallback=0.0)
+                if 0.0 < ratio < 1.0:
+                    defaults["column_width_ratio"] = ratio
+            except ValueError:
+                pass
         except (configparser.Error, OSError, ValueError):
             return {
                 "last_csv": "",
@@ -229,6 +283,8 @@ class CopyListWindow(QWidget):
                 "pause_copy": False,
                 "window_x": None,
                 "window_y": None,
+                "column_width": None,
+                "column_width_ratio": None,
             }
         return defaults
 
@@ -244,12 +300,16 @@ class CopyListWindow(QWidget):
 
     def _save_settings(self):
         parser = configparser.ConfigParser()
+        column_width = self._settings.get("column_width")
+        column_width_ratio = self._settings.get("column_width_ratio")
         parser[INI_SECTION] = {
             "last_csv": self._current_csv_name(),
             "always_on_top": "1" if self.always_on_top_checkbox.isChecked() else "0",
             "pause_copy": "1" if self.pause_copy_checkbox.isChecked() else "0",
             "window_x": str(self.x()),
             "window_y": str(self.y()),
+            "column_width": str(column_width) if column_width is not None else "",
+            "column_width_ratio": str(column_width_ratio) if column_width_ratio is not None else "",
         }
         try:
             with open(self.ini_path, "w", encoding="utf-8") as f:
