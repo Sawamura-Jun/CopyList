@@ -19,7 +19,7 @@ __pycache__
 *.csv
 *.log
 AGENTS.md
-.ps1
+*.ps1
 
 # tests
 tests/
