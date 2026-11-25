@@ -2,10 +2,12 @@ import csv
 import configparser
 import ctypes
 from ctypes import wintypes
+from io import StringIO
 import os
 import sys
+from time import sleep
 
-from PySide6.QtCore import QEvent, Qt, QTimer, QUrl
+from PySide6.QtCore import QByteArray, QEvent, QIODevice, QSaveFile, QSignalBlocker, Qt, QTimer, QUrl
 from PySide6.QtGui import QColor, QDesktopServices, QIcon, QPainter
 from PySide6.QtWidgets import (
     QApplication,
@@ -43,11 +45,12 @@ HWND_NOTOPMOST = -2
 class CopyListWindow(QWidget):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("CopyList v1.3.5")
+        self.setWindowTitle("CopyList v1.3.6")
         self.resize(*WINDOW_SIZE)
 
         self._suspend_events = False  # 変更イベントの再入を抑止
         self._applying_column_width = False  # カラム幅の復元中は保存を抑止
+        self._restore_list_state_pending = True
         self.app_dir = self._get_app_dir()
         self._user32 = self._load_user32()
         self.ini_path = os.path.join(self.app_dir, INI_FILENAME)
@@ -121,7 +124,7 @@ class CopyListWindow(QWidget):
         btn_down.clicked.connect(self.on_move_down)
 
         self._initialize_controls_from_settings()
-        self._restore_window_position_from_settings()
+        self._restore_window_geometry()
         self.load_csv()  # 起動時にCSV読み込み
         self.ensure_trailing_empty()
         header.sectionResized.connect(self.on_column_resized)
@@ -250,22 +253,26 @@ class CopyListWindow(QWidget):
             "last_csv": "",
             "always_on_top": False,
             "pause_copy": False,
+            "window_geometry": "",
             "window_x": None,
             "window_y": None,
             "column_width": None,
             "column_width_ratio": None,
+            "selected_row": None,
+            "vertical_scroll": None,
         }
         if not os.path.exists(self.ini_path):
             return defaults
 
-        parser = configparser.ConfigParser()
+        parser = configparser.ConfigParser(interpolation=None)
         try:
             parser.read(self.ini_path, encoding="utf-8")
-            defaults["last_csv"] = parser.get(INI_SECTION, "last_csv", fallback="").strip()
+            defaults["last_csv"] = parser.get(INI_SECTION, "last_csv", fallback="")
             defaults["always_on_top"] = parser.getboolean(INI_SECTION, "always_on_top", fallback=False)
             defaults["pause_copy"] = parser.getboolean(INI_SECTION, "pause_copy", fallback=False)
-            defaults["window_x"] = self._parse_optional_int(parser.get(INI_SECTION, "window_x", fallback=""))
-            defaults["window_y"] = self._parse_optional_int(parser.get(INI_SECTION, "window_y", fallback=""))
+            defaults["window_geometry"] = parser.get(INI_SECTION, "window_geometry", fallback="")
+            for key in ("window_x", "window_y", "selected_row", "vertical_scroll"):
+                defaults[key] = self._parse_optional_int(parser.get(INI_SECTION, key, fallback=""))
             column_width = self._parse_optional_int(parser.get(INI_SECTION, "column_width", fallback=""))
             if column_width is not None and column_width > 0:
                 defaults["column_width"] = column_width
@@ -277,15 +284,7 @@ class CopyListWindow(QWidget):
             except ValueError:
                 pass
         except (configparser.Error, OSError, ValueError):
-            return {
-                "last_csv": "",
-                "always_on_top": False,
-                "pause_copy": False,
-                "window_x": None,
-                "window_y": None,
-                "column_width": None,
-                "column_width_ratio": None,
-            }
+            pass
         return defaults
 
     @staticmethod
@@ -299,29 +298,67 @@ class CopyListWindow(QWidget):
             return None
 
     def _save_settings(self):
-        parser = configparser.ConfigParser()
+        parser = configparser.ConfigParser(interpolation=None)
         column_width = self._settings.get("column_width")
         column_width_ratio = self._settings.get("column_width_ratio")
+        selected_rows = self.table.selectionModel().selectedRows()
         parser[INI_SECTION] = {
             "last_csv": self._current_csv_name(),
             "always_on_top": "1" if self.always_on_top_checkbox.isChecked() else "0",
             "pause_copy": "1" if self.pause_copy_checkbox.isChecked() else "0",
             "window_x": str(self.x()),
             "window_y": str(self.y()),
+            "window_geometry": bytes(self.saveGeometry()).hex(),
             "column_width": str(column_width) if column_width is not None else "",
             "column_width_ratio": str(column_width_ratio) if column_width_ratio is not None else "",
+            "selected_row": str(selected_rows[0].row()) if selected_rows else "",
+            "vertical_scroll": str(self.table.verticalScrollBar().value()),
         }
-        try:
-            with open(self.ini_path, "w", encoding="utf-8") as f:
-                parser.write(f)
-        except OSError:
-            pass
+        # 書き込みが途中で失敗しても、既存の設定ファイルを残す。
+        buffer = StringIO()
+        parser.write(buffer)
+        data = buffer.getvalue().encode("utf-8")
+        # Windowsでファイルの置き換えが一時的に拒否されたときは短時間待って再試行する。
+        for delay in (0, 0.02, 0.05):
+            if delay:
+                sleep(delay)
+            settings_file = QSaveFile(self.ini_path)
+            if not settings_file.open(QIODevice.OpenModeFlag.WriteOnly):
+                return
+            if settings_file.write(data) != len(data):
+                return
+            if settings_file.commit() or settings_file.error() != QSaveFile.FileError.RenameError:
+                return
 
-    def _restore_window_position_from_settings(self):
+    def _restore_window_geometry(self):
+        try:
+            geometry = QByteArray(bytes.fromhex(self._settings["window_geometry"]))
+        except ValueError:
+            geometry = QByteArray()
+        if geometry and self.restoreGeometry(geometry):
+            return
+
+        # ウィンドウ情報がない旧形式のINIからは座標を引き継ぐ。
         x = self._settings.get("window_x")
         y = self._settings.get("window_y")
         if isinstance(x, int) and isinstance(y, int):
             self.move(x, y)
+
+    def _restore_list_state(self):
+        if self._current_csv_name() != self._settings["last_csv"]:
+            return
+
+        row = self._settings["selected_row"]
+        if row is not None and 0 <= row < self.table.rowCount():
+            # 起動時の行選択でクリップボードを書き換えない。
+            with QSignalBlocker(self.table):
+                self._select_row(row)
+
+        scroll = self._settings["vertical_scroll"]
+        if scroll is not None:
+            # 行選択による自動スクロールの後に、終了時の表示位置を復元する。
+            scrollbar = self.table.verticalScrollBar()
+            scrollbar.setValue(max(scrollbar.minimum(), min(scroll, scrollbar.maximum())))
 
     def _list_csv_files(self):
         files = []
@@ -622,6 +659,13 @@ class CopyListWindow(QWidget):
         item = self.table.item(row, 0)
         if item is not None:
             self.table.scrollToItem(item)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if self._restore_list_state_pending:
+            self._restore_list_state_pending = False
+            # ウィンドウの初回表示でスクロール範囲が決まってから復元する。
+            QTimer.singleShot(0, self, self._restore_list_state)
 
     def closeEvent(self, event):
         self._save_settings()
